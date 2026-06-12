@@ -7,6 +7,8 @@ export type TrackId =
   | "stab"
   | "texture";
 
+export type ActiveView = "pattern" | "arrangement";
+
 export interface Snapshot {
   id: string;
   name: string;
@@ -42,6 +44,7 @@ export type TrackPattern = Record<TrackId, boolean[]>;
 export type PatternBank = Record<string, boolean[]>;
 
 export interface Song {
+  activeView: ActiveView;
   bpm: number;
   swing: number;
   masterVolume: number;

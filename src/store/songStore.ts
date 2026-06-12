@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ArrangementBlock, PatternBank, Snapshot, Song, Track, TrackId, TrackPattern } from "../types/song";
+import type { ActiveView, ArrangementBlock, PatternBank, Snapshot, Song, Track, TrackId, TrackPattern } from "../types/song";
 
 const stepCount = 16;
 const defaultPatternLength = 16;
@@ -115,6 +115,14 @@ const makeSnapshot = (id: string, name: string): Snapshot => ({
   patternIds: makeSnapshotPatternIds(id),
 });
 
+const nextPatternName = (existingSnapshots: Snapshot[]) => {
+  const usedNames = new Set(existingSnapshots.map((snapshot) => snapshot.name.toUpperCase()));
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+  const nextLetter = alphabet.find((letter) => !usedNames.has(letter));
+
+  return nextLetter ?? `P${existingSnapshots.length + 1}`;
+};
+
 const buildPatternsForSnapshots = (snapshots: Snapshot[]): PatternBank =>
   snapshots.reduce((patterns, snapshot) => {
     trackIds.forEach((trackId) => {
@@ -133,23 +141,12 @@ const recalculateStartBars = (blocks: ArrangementBlock[]) => {
   });
 };
 
-const snapshots = [
-  makeSnapshot("snapshot-intro", "Intro Pulse"),
-  makeSnapshot("snapshot-groove-a", "Groove A"),
-  makeSnapshot("snapshot-break", "Sparse Break"),
-  makeSnapshot("snapshot-peak", "Peak Drive"),
-  makeSnapshot("snapshot-outro", "Outro Pulse"),
-];
+const snapshots = [makeSnapshot("pattern-a", "A")];
 
-const arrangementBlocks = recalculateStartBars([
-  { id: "block-intro", snapshotId: "snapshot-intro", startBar: 1, lengthBars: 16 },
-  { id: "block-groove-a", snapshotId: "snapshot-groove-a", startBar: 17, lengthBars: 32 },
-  { id: "block-break", snapshotId: "snapshot-break", startBar: 49, lengthBars: 16 },
-  { id: "block-peak", snapshotId: "snapshot-peak", startBar: 65, lengthBars: 32 },
-  { id: "block-outro", snapshotId: "snapshot-outro", startBar: 97, lengthBars: 16 },
-]);
+const arrangementBlocks: ArrangementBlock[] = [];
 
 const initialSong: Song = {
+  activeView: "pattern",
   bpm: 128,
   swing: 12,
   masterVolume: 82,
@@ -158,8 +155,8 @@ const initialSong: Song = {
   patterns: buildPatternsForSnapshots(snapshots),
   snapshots,
   arrangementBlocks,
-  selectedSnapshotId: "snapshot-groove-a",
-  selectedArrangementBlockId: "block-groove-a",
+  selectedSnapshotId: "pattern-a",
+  selectedArrangementBlockId: "",
 };
 
 interface SongState {
@@ -172,15 +169,21 @@ interface SongState {
   setDensity: (density: number) => void;
   setPlaying: (isPlaying: boolean) => void;
   setCurrentStep: (step: number) => void;
+  setActiveView: (activeView: ActiveView) => void;
   selectSnapshot: (snapshotId: string) => void;
   selectArrangementBlock: (blockId: string) => void;
   renameSelectedSnapshot: (name: string) => void;
   createSnapshot: () => void;
   duplicateSelectedSnapshot: () => void;
+  deleteSelectedSnapshot: () => void;
   addSelectedSnapshotToArrangement: () => void;
+  addSnapshotToArrangement: (snapshotId: string) => void;
+  addSnapshotToArrangementAt: (snapshotId: string, insertIndex: number) => void;
   duplicateSelectedArrangementBlock: () => void;
   deleteSelectedArrangementBlock: () => void;
+  deleteArrangementBlock: (blockId: string) => void;
   setSelectedBlockLength: (lengthBars: number) => void;
+  setArrangementBlockLength: (blockId: string, lengthBars: number) => void;
   reorderArrangementBlock: (fromIndex: number, toIndex: number) => void;
   toggleStep: (trackId: TrackId, step: number) => void;
   setTrackVolume: (trackId: TrackId, volume: number) => void;
@@ -201,6 +204,13 @@ const getSelectedSnapshot = (song: Song) =>
 const getSelectedBlock = (song: Song) =>
   song.arrangementBlocks.find((block) => block.id === song.selectedArrangementBlockId) ??
   song.arrangementBlocks[0];
+
+const makeArrangementBlock = (snapshotId: string, lengthBars = 16): ArrangementBlock => ({
+  id: makeId("block"),
+  snapshotId,
+  startBar: 1,
+  lengthBars,
+});
 
 const getSnapshotTrackPattern = (song: Song, snapshot: Snapshot): TrackPattern =>
   trackIds.reduce((pattern, trackId) => {
@@ -336,8 +346,12 @@ export const useSongStore = create<SongState>((set) => ({
     set((state) => ({ song: { ...state.song, density: Math.round(density) } })),
   setPlaying: (isPlaying) => set({ isPlaying }),
   setCurrentStep: (currentStep) => set({ currentStep }),
+  setActiveView: (activeView) =>
+    set((state) => ({ song: { ...state.song, activeView } })),
   selectSnapshot: (snapshotId) =>
-    set((state) => ({ song: { ...state.song, selectedSnapshotId: snapshotId } })),
+    set((state) => ({
+      song: { ...state.song, selectedSnapshotId: snapshotId, selectedArrangementBlockId: "" },
+    })),
   selectArrangementBlock: (blockId) =>
     set((state) => {
       const block = state.song.arrangementBlocks.find((candidate) => candidate.id === blockId);
@@ -361,8 +375,8 @@ export const useSongStore = create<SongState>((set) => ({
     })),
   createSnapshot: () =>
     set((state) => {
-      const snapshotId = makeId("snapshot");
-      const snapshot = makeSnapshot(snapshotId, "New Snapshot");
+      const snapshotId = makeId("pattern");
+      const snapshot = makeSnapshot(snapshotId, nextPatternName(state.song.snapshots));
       const patterns = trackIds.reduce(
         (nextPatterns, trackId) => ({
           ...nextPatterns,
@@ -382,8 +396,8 @@ export const useSongStore = create<SongState>((set) => ({
   duplicateSelectedSnapshot: () =>
     set((state) => {
       const source = getSelectedSnapshot(state.song);
-      const snapshotId = makeId("snapshot");
-      const snapshot = makeSnapshot(snapshotId, `${source.name} Copy`);
+      const snapshotId = makeId("pattern");
+      const snapshot = makeSnapshot(snapshotId, nextPatternName(state.song.snapshots));
       const sourcePattern = getSnapshotTrackPattern(state.song, source);
       return {
         song: {
@@ -394,16 +408,49 @@ export const useSongStore = create<SongState>((set) => ({
         },
       };
     }),
+  deleteSelectedSnapshot: () =>
+    set((state) => {
+      if (state.song.snapshots.length <= 1) return state;
+
+      const selectedIndex = state.song.snapshots.findIndex(
+        (snapshot) => snapshot.id === state.song.selectedSnapshotId,
+      );
+      const snapshots = state.song.snapshots.filter(
+        (snapshot) => snapshot.id !== state.song.selectedSnapshotId,
+      );
+      const nextSnapshot = snapshots[Math.min(Math.max(selectedIndex, 0), snapshots.length - 1)];
+      const arrangementBlocks = state.song.arrangementBlocks.filter(
+        (block) => block.snapshotId !== state.song.selectedSnapshotId,
+      );
+      const deletedPatternIds =
+        state.song.snapshots.find((snapshot) => snapshot.id === state.song.selectedSnapshotId)
+          ?.patternIds ?? ({} as Record<TrackId, string>);
+      const patterns = Object.entries(state.song.patterns).reduce((nextPatterns, [patternId, steps]) => {
+        if (!Object.values(deletedPatternIds).includes(patternId)) {
+          nextPatterns[patternId] = steps;
+        }
+
+        return nextPatterns;
+      }, {} as PatternBank);
+
+      return {
+        song: {
+          ...state.song,
+          snapshots,
+          patterns,
+          arrangementBlocks: recalculateStartBars(arrangementBlocks),
+          selectedSnapshotId: nextSnapshot.id,
+          selectedArrangementBlockId: "",
+        },
+      };
+    }),
   addSelectedSnapshotToArrangement: () =>
     set((state) => {
       const selectedBlock = getSelectedBlock(state.song);
-      const selectedIndex = state.song.arrangementBlocks.findIndex((block) => block.id === selectedBlock.id);
-      const block: ArrangementBlock = {
-        id: makeId("block"),
-        snapshotId: state.song.selectedSnapshotId,
-        startBar: 1,
-        lengthBars: selectedBlock?.lengthBars ?? 16,
-      };
+      const selectedIndex = selectedBlock
+        ? state.song.arrangementBlocks.findIndex((block) => block.id === selectedBlock.id)
+        : -1;
+      const block = makeArrangementBlock(state.song.selectedSnapshotId, selectedBlock?.lengthBars ?? 16);
       const insertIndex = selectedIndex >= 0 ? selectedIndex + 1 : state.song.arrangementBlocks.length;
       const blocks = [
         ...state.song.arrangementBlocks.slice(0, insertIndex),
@@ -415,12 +462,47 @@ export const useSongStore = create<SongState>((set) => ({
           ...state.song,
           arrangementBlocks: recalculateStartBars(blocks),
           selectedArrangementBlockId: block.id,
+          selectedSnapshotId: block.snapshotId,
+        },
+      };
+    }),
+  addSnapshotToArrangement: (snapshotId) =>
+    set((state) => {
+      if (!state.song.snapshots.some((snapshot) => snapshot.id === snapshotId)) return state;
+      const block = makeArrangementBlock(snapshotId);
+      return {
+        song: {
+          ...state.song,
+          arrangementBlocks: recalculateStartBars([...state.song.arrangementBlocks, block]),
+          selectedArrangementBlockId: block.id,
+          selectedSnapshotId: snapshotId,
+        },
+      };
+    }),
+  addSnapshotToArrangementAt: (snapshotId, insertIndex) =>
+    set((state) => {
+      if (!state.song.snapshots.some((snapshot) => snapshot.id === snapshotId)) return state;
+      const block = makeArrangementBlock(snapshotId);
+      const safeInsertIndex = Math.max(0, Math.min(Math.round(insertIndex), state.song.arrangementBlocks.length));
+      const blocks = [
+        ...state.song.arrangementBlocks.slice(0, safeInsertIndex),
+        block,
+        ...state.song.arrangementBlocks.slice(safeInsertIndex),
+      ];
+
+      return {
+        song: {
+          ...state.song,
+          arrangementBlocks: recalculateStartBars(blocks),
+          selectedArrangementBlockId: block.id,
+          selectedSnapshotId: snapshotId,
         },
       };
     }),
   duplicateSelectedArrangementBlock: () =>
     set((state) => {
       const source = getSelectedBlock(state.song);
+      if (!source) return state;
       const sourceIndex = state.song.arrangementBlocks.findIndex((block) => block.id === source.id);
       const block = { ...source, id: makeId("block") };
       const blocks = [
@@ -439,18 +521,40 @@ export const useSongStore = create<SongState>((set) => ({
     }),
   deleteSelectedArrangementBlock: () =>
     set((state) => {
-      if (state.song.arrangementBlocks.length <= 1) return state;
+      if (state.song.arrangementBlocks.length === 0) return state;
       const selectedIndex = state.song.arrangementBlocks.findIndex(
         (block) => block.id === state.song.selectedArrangementBlockId,
       );
       const blocks = state.song.arrangementBlocks.filter((block) => block.id !== state.song.selectedArrangementBlockId);
-      const nextBlock = blocks[Math.min(Math.max(selectedIndex, 0), blocks.length - 1)];
+      const nextBlock = blocks.length > 0 ? blocks[Math.min(Math.max(selectedIndex, 0), blocks.length - 1)] : null;
       return {
         song: {
           ...state.song,
           arrangementBlocks: recalculateStartBars(blocks),
-          selectedArrangementBlockId: nextBlock.id,
-          selectedSnapshotId: nextBlock.snapshotId,
+          selectedArrangementBlockId: nextBlock?.id ?? "",
+          selectedSnapshotId: nextBlock?.snapshotId ?? state.song.selectedSnapshotId,
+        },
+      };
+    }),
+  deleteArrangementBlock: (blockId) =>
+    set((state) => {
+      if (!state.song.arrangementBlocks.some((block) => block.id === blockId)) return state;
+      const selectedIndex = state.song.arrangementBlocks.findIndex((block) => block.id === blockId);
+      const blocks = state.song.arrangementBlocks.filter((block) => block.id !== blockId);
+      const nextBlock =
+        blockId === state.song.selectedArrangementBlockId && blocks.length > 0
+          ? blocks[Math.min(Math.max(selectedIndex, 0), blocks.length - 1)]
+          : blocks.find((block) => block.id === state.song.selectedArrangementBlockId);
+
+      return {
+        song: {
+          ...state.song,
+          arrangementBlocks: recalculateStartBars(blocks),
+          selectedArrangementBlockId: nextBlock?.id ?? "",
+          selectedSnapshotId:
+            blockId === state.song.selectedArrangementBlockId
+              ? nextBlock?.snapshotId ?? state.song.selectedSnapshotId
+              : state.song.selectedSnapshotId,
         },
       };
     }),
@@ -463,6 +567,17 @@ export const useSongStore = create<SongState>((set) => ({
             block.id === state.song.selectedArrangementBlockId
               ? { ...block, lengthBars: Math.max(1, Math.round(lengthBars)) }
               : block,
+          ),
+        ),
+      },
+    })),
+  setArrangementBlockLength: (blockId, lengthBars) =>
+    set((state) => ({
+      song: {
+        ...state.song,
+        arrangementBlocks: recalculateStartBars(
+          state.song.arrangementBlocks.map((block) =>
+            block.id === blockId ? { ...block, lengthBars: Math.max(1, Math.round(lengthBars)) } : block,
           ),
         ),
       },

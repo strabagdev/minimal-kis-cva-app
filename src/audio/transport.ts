@@ -1,5 +1,5 @@
 import * as Tone from "tone";
-import type { Song, Track, TrackId } from "../types/song";
+import type { ActiveView, ArrangementBlock, Song, Track, TrackId } from "../types/song";
 
 type TrackVoice = {
   instrument: Tone.ToneAudioNode;
@@ -11,11 +11,13 @@ type TrackVoice = {
 type Voices = Record<TrackId, TrackVoice>;
 
 let voices: Voices | null = null;
-let sequence: Tone.Sequence<number> | null = null;
+let repeatEventId: number | null = null;
 let liveSong: Song | null = null;
 let onStepCallback: ((step: number) => void) | null = null;
 let masterChannel: Tone.Channel | null = null;
 let masterMeter: Tone.Meter | null = null;
+let liveActiveView: ActiveView = "pattern";
+let transportStep = 0;
 
 const getMaster = () => {
   if (masterChannel && masterMeter) {
@@ -23,7 +25,7 @@ const getMaster = () => {
   }
 
   masterChannel = new Tone.Channel({ volume: volumeToDb(82) });
-  masterMeter = new Tone.Meter({ normalRange: true, smoothing: 0.82 });
+  masterMeter = new Tone.Meter({ smoothing: 0.78 });
   masterChannel.connect(masterMeter);
   masterChannel.toDestination();
 
@@ -213,8 +215,8 @@ const applyInstrumentParams = (tracks: Track[]) => {
 const getSelectedSnapshot = (song: Song) =>
   song.snapshots.find((snapshot) => snapshot.id === song.selectedSnapshotId) ?? song.snapshots[0];
 
-const getTrackSteps = (song: Song, trackId: TrackId) => {
-  const snapshot = getSelectedSnapshot(song);
+const getPatternSteps = (song: Song, snapshotId: string, trackId: TrackId) => {
+  const snapshot = song.snapshots.find((candidate) => candidate.id === snapshotId);
 
   if (!snapshot) {
     return [];
@@ -290,65 +292,135 @@ export const syncTransportSettings = (bpm: number, swing: number) => {
 
 export const syncSongState = (song: Song) => {
   liveSong = song;
+  liveActiveView = song.activeView;
   syncTransportSettings(song.bpm, song.swing);
   applyMaster(song.masterVolume);
   applyMixer(song.tracks);
   applyInstrumentParams(song.tracks);
 };
 
+export const syncPlaybackMode = (activeView: ActiveView) => {
+  if (liveActiveView !== activeView) {
+    transportStep = 0;
+    onStepCallback?.(-1);
+  }
+
+  liveActiveView = activeView;
+};
+
 export const getMasterLevel = () => {
   const value = getMaster().meter.getValue();
-  const level = Array.isArray(value) ? Math.max(...value) : value;
+  const meterValue = Array.isArray(value) ? Math.max(...value) : value;
+
+  if (!Number.isFinite(meterValue)) {
+    return 0;
+  }
+
+  if (meterValue >= 0 && meterValue <= 1) {
+    return meterValue;
+  }
+
+  const level = Tone.dbToGain(meterValue);
 
   return Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 0;
 };
 
-const ensureSequence = () => {
-  if (sequence) {
-    return sequence;
+const getArrangementTotalSteps = (song: Song) =>
+  song.arrangementBlocks.reduce((total, block) => total + Math.max(1, block.lengthBars) * 16, 0);
+
+const getArrangementBlockAtStep = (blocks: ArrangementBlock[], step: number) => {
+  let blockStartStep = 0;
+
+  for (const block of blocks) {
+    const blockSteps = Math.max(1, block.lengthBars) * 16;
+    const blockEndStep = blockStartStep + blockSteps;
+
+    if (step >= blockStartStep && step < blockEndStep) {
+      return { block, localStep: step - blockStartStep };
+    }
+
+    blockStartStep = blockEndStep;
   }
 
-  sequence = new Tone.Sequence(
-    (time, step) => {
-      onStepCallback?.(step);
+  return null;
+};
 
-      const song = liveSong;
-      if (!song) {
-        return;
-      }
+const playPatternStep = (song: Song, snapshotId: string, step: number, time: Tone.Unit.Time) => {
+  song.tracks.forEach((track) => {
+    const patternStep = getTrackPatternStep(track, step);
 
-      song.tracks.forEach((track) => {
-        const patternStep = getTrackPatternStep(track, step);
+    if (isTrackAudible(track, song.tracks) && getPatternSteps(song, snapshotId, track.id)[patternStep]) {
+      triggerTrack(track, time);
+    }
+  });
+};
 
-        if (isTrackAudible(track, song.tracks) && getTrackSteps(song, track.id)[patternStep]) {
-          triggerTrack(track, time);
-        }
-      });
-    },
-    Array.from({ length: 128 }, (_, step) => step),
-    "16n",
-  );
+const tickPatternMode = (song: Song, time: Tone.Unit.Time) => {
+  const snapshot = getSelectedSnapshot(song);
 
-  return sequence;
+  if (!snapshot) {
+    onStepCallback?.(-1);
+    return;
+  }
+
+  onStepCallback?.(transportStep);
+  playPatternStep(song, snapshot.id, transportStep, time);
+  transportStep += 1;
+};
+
+const tickArrangementMode = (song: Song, time: Tone.Unit.Time) => {
+  const totalSteps = getArrangementTotalSteps(song);
+
+  if (totalSteps <= 0) {
+    onStepCallback?.(-1);
+    return;
+  }
+
+  const songStep = transportStep % totalSteps;
+  const currentBlock = getArrangementBlockAtStep(song.arrangementBlocks, songStep);
+  onStepCallback?.(songStep);
+
+  if (currentBlock) {
+    playPatternStep(song, currentBlock.block.snapshotId, currentBlock.localStep, time);
+  }
+
+  transportStep = (songStep + 1) % totalSteps;
+};
+
+const ensureScheduler = () => {
+  if (repeatEventId !== null) {
+    return;
+  }
+
+  repeatEventId = Tone.Transport.scheduleRepeat((time) => {
+    const song = liveSong;
+    if (!song) return;
+
+    if (liveActiveView === "arrangement") {
+      tickArrangementMode(song, time);
+      return;
+    }
+
+    tickPatternMode(song, time);
+  }, "16n");
 };
 
 export const startLoop = async (song: Song, onStep: (step: number) => void) => {
   await Tone.start();
   syncSongState(song);
   onStepCallback = onStep;
+  liveActiveView = song.activeView;
+  transportStep = 0;
 
-  const activeSequence = ensureSequence();
-  activeSequence.stop(0);
+  ensureScheduler();
   Tone.Transport.stop();
   Tone.Transport.position = 0;
   onStep(-1);
-
-  activeSequence.start(0);
   Tone.Transport.start();
 };
 
 export const stopLoop = (onStep: (step: number) => void) => {
   Tone.Transport.stop();
-  sequence?.stop();
+  transportStep = 0;
   onStep(-1);
 };
